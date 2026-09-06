@@ -1,39 +1,25 @@
-# 理伴 Android 比赛版
+# 理伴 Android
 
-理伴是一个 Android 消费决策助手：用户在购物、外卖或网页页面点击悬浮球，应用通过 MediaProjection 取得当前画面，调用多模态模型识别商品，并综合预算、储蓄目标、购买历史、冲动信号和参考价格返回建议。
+理伴是一个 Android 消费决策助手。用户在购物页面点击悬浮球后，应用通过 MediaProjection 在内存中取得画面，使用随 APK 内置的 ML Kit 中文 OCR 识别商品和价格，再结合预算、储蓄目标、消费历史与促销信号先给出本地结论。价格证据随后原位更新，不阻塞反馈。
 
-## 工程要求
+## 隐私和数据流
+
+- 原始截图、Bitmap 和 OCR 全文不写入文件、Room 或日志，也绝不发送到网络。
+- 网络请求只包含商品名称、型号、页面价格和最多三条必要的搜索摘要。
+- 搜索证据达到三个独立来源时直接生成参考区间，不调用 LLM。
+- 搜索不足或未配置时才调用 OpenAI-compatible 文本模型估价，并明确标识为“搜索辅助估价”或“模型知识估价”。
+- 模型估价只用于展示，不能降低本地风险等级，也不能单独触发“建议购买”。
+- API Key 使用 Android Keystore 生成的 AES-GCM 密钥加密，配置只保存在当前设备。
+
+## 构建
 
 - Android Studio（支持 AGP 9.4）
-- Gradle 9.6（工程 Wrapper 已固定为 9.6.0）
+- Gradle Wrapper 9.6.0
 - Android SDK Platform 36.1 / Build Tools 36
-- JDK 17 或兼容的 Android Studio Embedded JDK
-- Android 15/16 真机；API 36 模拟器用于页面和数据库回归
+- JDK 17 或 Android Studio Embedded JDK
+- `minSdk 35`、`targetSdk 36`
 
-复制 `local.properties.example` 为 `local.properties`，填写本机 SDK 路径。外部服务未配置时应用仍可运行三套 Demo，但结果会显示“演示回退数据”。
-
-```properties
-LIBAN_LLM_BASE_URL=https://provider.example/v1/chat/completions
-LIBAN_LLM_API_KEY=short-lived-key
-LIBAN_LLM_MODEL=multimodal-model
-LIBAN_PRICE_BASE_URL=https://provider.example/price/search
-LIBAN_PRICE_API_KEY=short-lived-key
-```
-
-LLM 接口采用 OpenAI-compatible Chat Completions 结构并要求返回 JSON。物价接口接受 `q` 和 `page_price_cents` 查询参数，返回：
-
-```json
-{
-  "availability": "AVAILABLE",
-  "reference_low_cents": 249900,
-  "reference_high_cents": 269900,
-  "page_price_cents": 289900,
-  "premium_ratio": 0.074,
-  "source": "LIVE"
-}
-```
-
-## 构建与测试
+复制 `local.properties.example` 为 `local.properties`，只填写 SDK 路径。服务地址、模型名和密钥均在应用“设置”页填写，不再进入 BuildConfig。
 
 ```powershell
 .\gradlew.bat testDebugUnitTest
@@ -41,21 +27,34 @@ LLM 接口采用 OpenAI-compatible Chat Completions 结构并要求返回 JSON�
 .\gradlew.bat connectedDebugAndroidTest
 ```
 
-当前工作区路径含中文。部分 Windows JDK 会在 JVM 单测子进程中错误编码这类路径；仓库提供了一键构建脚本，通过临时 `R:` 映射规避该问题，并在结束后自动释放盘符：
+当前工作区路径含中文，必要时可运行：
 
 ```powershell
 .\build-competition.ps1
 ```
 
-Wrapper 使用腾讯 Gradle 镜像以匹配本机已部署缓存；如需切回官方源，将 `gradle/wrapper/gradle-wrapper.properties` 中域名改为 `services.gradle.org` 即可。
+APK 位于 `app/build/outputs/apk/debug/app-debug.apk`。
 
-APK 位于 `app/build/outputs/apk/debug/app-debug.apk`。密钥会进入 APK，仅可使用比赛专用、短期、限额密钥，赛后立即轮换。
+## 客户端接口
 
-## 隐私与系统行为
+LLM 支持 OpenAI-compatible Chat Completions 文本接口，Endpoint 应填写完整的 `/v1/chat/completions` 地址。模型固定返回 `KNOWN/UNKNOWN`、人民币分区间、置信度和简短依据。
 
-- 屏幕截图只在内存中压缩和上传，不写入磁盘、数据库或日志。
-- Android 14+ 的 MediaProjection 授权仅用于当前持续识屏会话；锁屏、系统停止或新投屏会话开始后必须重新授权。
-- 悬浮窗、通知和投屏均由用户显式开启，常驻通知可随时停止服务。
-- 受保护页面或近全黑截图会转入手动商品信息输入。
+智谱搜索默认配置：
 
-完整演示步骤见 [DEMO_RUNBOOK.md](DEMO_RUNBOOK.md)。原始产品说明保留在 `理伴_Android比赛版实现计划_V1.1.md`，规范架构图为 `理伴_系统架构图.png`。
+- Base URL：`https://open.bigmodel.cn/api`
+- 搜索：`POST /paas/v4/web_search`
+- 阅读：`POST /paas/v4/reader`
+- 引擎：`search_pro`
+- 10 条结果、`content_size=high`
+
+接口字段以 [智谱联网搜索.md](智谱联网搜索.md) 和 [智谱网页阅读.md](智谱网页阅读.md) 为准。
+
+## 超时与来源
+
+- 本地 OCR 与初步决策目标 P50 小于 1 秒。
+- 搜索硬超时 3 秒，网页阅读总预算 1.2 秒。
+- 整个价格增强链路最迟 5 秒结束。
+- 搜索缓存 2 小时；模型估价缓存 24 小时。
+- 价格来源为 `SEARCH_VERIFIED`、`SEARCH_ASSISTED_ESTIMATE`、`MODEL_ESTIMATE` 或 `UNAVAILABLE`。
+
+历史数据库从 v1 显式迁移到 v2，旧预算、目标、交易和决策均保留；旧决策在界面标记为“旧版记录”。

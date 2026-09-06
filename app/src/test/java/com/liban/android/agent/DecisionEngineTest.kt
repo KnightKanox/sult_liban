@@ -1,37 +1,54 @@
 package com.liban.android.agent
 
-import com.liban.android.demo.DemoFixtures
-import com.liban.android.demo.DemoScenario
 import com.liban.android.model.*
-import org.junit.Assert.assertEquals
-import org.junit.Assert.assertTrue
+import org.junit.Assert.*
 import org.junit.Test
 
 class DecisionEngineTest {
+    private val scene = SceneContext(
+        product = Product("Sony WH-1000XM6", "electronics", model = "WH-1000XM6"),
+        price = PriceInfo(2_999_00),
+        confidence = 1.0,
+    )
+
     @Test
-    fun demoAProducesHighDelayFor24Hours() {
-        val scene = DemoFixtures.scene(DemoScenario.A)
-        val result = DecisionEngine.decide(
-            scene,
-            SkillResults(
-                budget = BudgetResult(1.49, RiskLevel.HIGH),
-                history = HistoryResult(0, RiskLevel.LOW),
-                impulse = ImpulseResult(1.0, RiskLevel.HIGH, listOf("limited_time", "scarcity", "discount")),
-            ),
-            SourceMode.FALLBACK,
+    fun verifiedPremiumCanRaiseRisk() {
+        val price = PriceComparison(
+            availability = Availability.AVAILABLE,
+            referenceLowCents = 2_300_00,
+            referenceHighCents = 2_500_00,
+            pagePriceCents = 2_999_00,
+            premiumRatio = 0.1996,
+            evidenceSource = PriceEvidenceSource.SEARCH_VERIFIED,
         )
+        val result = DecisionEngine.decide(scene, SkillResults(price = price))
         assertEquals(RiskLevel.HIGH, result.riskLevel)
         assertEquals(Recommendation.DELAY, result.recommendation)
-        assertEquals(24, result.delayHours)
-        assertEquals(SourceMode.FALLBACK, result.sourceMode)
+        assertTrue(result.display.keyPoints.any { it.contains("高于参考区间") })
     }
 
     @Test
-    fun demoBMentionsReferenceRange() {
-        val scene = DemoFixtures.scene(DemoScenario.B)
-        val price = DemoFixtures.price(scene.product, Money(scene.price.currentCents))!!
-        val result = DecisionEngine.decide(scene, SkillResults(price = price), SourceMode.FALLBACK)
-        assertTrue(result.display.keyPoints.any { it.contains("高于参考区间") })
+    fun modelEstimateNeverCreatesBuyRecommendation() {
+        val price = PriceComparison(
+            availability = Availability.AVAILABLE,
+            referenceLowCents = 2_800_00,
+            referenceHighCents = 3_200_00,
+            pagePriceCents = 2_999_00,
+            premiumRatio = -0.06,
+            evidenceSource = PriceEvidenceSource.MODEL_ESTIMATE,
+        )
+        val result = DecisionEngine.decide(
+            scene,
+            SkillResults(budget = BudgetResult(0.05, RiskLevel.LOW), price = price),
+        )
+        assertEquals(RiskLevel.LOW, result.riskLevel)
+        assertEquals(Recommendation.DELAY, result.recommendation)
+    }
+
+    @Test
+    fun finalDecisionKeepsPreliminaryId() {
+        val result = DecisionEngine.decide(scene, SkillResults(), decisionId = "same-id")
+        assertEquals("same-id", result.decisionId)
     }
 
     @Test(expected = IllegalArgumentException::class)
@@ -39,4 +56,3 @@ class DecisionEngineTest {
         Money(-1)
     }
 }
-

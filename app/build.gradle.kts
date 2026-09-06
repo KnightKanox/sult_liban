@@ -1,22 +1,8 @@
-import java.util.Properties
-
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization")
     id("com.google.devtools.ksp")
-}
-
-val localProperties = Properties().apply {
-    val file = rootProject.file("local.properties")
-    if (file.exists()) file.inputStream().use(::load)
-}
-
-fun configString(name: String): String {
-    val value = localProperties.getProperty(name, "")
-        .replace("\\", "\\\\")
-        .replace("\"", "\\\"")
-    return "\"$value\""
 }
 
 android {
@@ -37,11 +23,6 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
 
-        buildConfigField("String", "LLM_BASE_URL", configString("LIBAN_LLM_BASE_URL"))
-        buildConfigField("String", "LLM_API_KEY", configString("LIBAN_LLM_API_KEY"))
-        buildConfigField("String", "LLM_MODEL", configString("LIBAN_LLM_MODEL"))
-        buildConfigField("String", "PRICE_BASE_URL", configString("LIBAN_PRICE_BASE_URL"))
-        buildConfigField("String", "PRICE_API_KEY", configString("LIBAN_PRICE_API_KEY"))
     }
 
     buildTypes {
@@ -58,7 +39,6 @@ android {
 
     buildFeatures {
         compose = true
-        buildConfig = true
     }
 
     packaging.resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
@@ -85,7 +65,10 @@ dependencies {
     ksp("androidx.room:room-compiler:2.8.4")
 
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
+    implementation("org.jetbrains.kotlinx:kotlinx-coroutines-play-services:1.10.2")
     implementation("org.jetbrains.kotlinx:kotlinx-serialization-json:1.9.0")
+    implementation("androidx.datastore:datastore-preferences:1.1.7")
+    implementation("com.google.mlkit:text-recognition-chinese:16.0.1")
     implementation("com.squareup.retrofit2:retrofit:2.11.0")
     implementation("com.squareup.okhttp3:okhttp:4.12.0")
     implementation("com.squareup.okhttp3:logging-interceptor:4.12.0")

@@ -26,7 +26,6 @@ import com.liban.android.agent.AnalysisBus
 import com.liban.android.agent.LowConfidenceException
 import com.liban.android.model.*
 import kotlinx.coroutines.*
-import java.io.ByteArrayOutputStream
 import kotlin.math.abs
 
 class FloatingCaptureService : Service() {
@@ -139,7 +138,6 @@ class FloatingCaptureService : Service() {
         if (analysisJob?.isActive == true || projection == null) return
         analysisJob = serviceScope.launch {
             var bitmap: Bitmap? = null
-            var jpeg: ByteArray? = null
             try {
                 AnalysisBus.update(AnalysisState.Capturing)
                 removeOverlayViews()
@@ -150,14 +148,27 @@ class FloatingCaptureService : Service() {
                     showOpenAppOverlay("无法识别画面", "点击打开理伴手动输入")
                     return@launch
                 }
-                AnalysisBus.update(AnalysisState.Analyzing)
                 showAnalyzingOverlay()
-                jpeg = withContext(Dispatchers.Default) { compressForUpload(bitmap) }
-                bitmap.recycle()
-                bitmap = null
-                val (scene, decision) = graph.orchestrator.analyze(jpeg)
-                AnalysisBus.update(AnalysisState.Result(scene, decision))
-                showResultOverlay(scene, decision)
+                graph.orchestrator.analyze(
+                    bitmap = bitmap,
+                    onOcrFinished = {
+                        bitmap?.recycle()
+                        bitmap = null
+                    },
+                    onUpdate = { state ->
+                        AnalysisBus.update(state)
+                        when (state) {
+                            is AnalysisState.PreliminaryResult ->
+                                showResultOverlay(state.scene, state.decision, enriching = true)
+                            is AnalysisState.EnrichingPrice ->
+                                showResultOverlay(state.scene, state.decision, enriching = true)
+                            is AnalysisState.Result ->
+                                showResultOverlay(state.scene, state.decision, enriching = false)
+                            AnalysisState.Recognizing -> showAnalyzingOverlay("正在本地识别商品…")
+                            else -> Unit
+                        }
+                    },
+                )
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Throwable) {
@@ -170,7 +181,6 @@ class FloatingCaptureService : Service() {
                 }
             } finally {
                 bitmap?.recycle()
-                jpeg?.fill(0)
             }
         }
     }
@@ -195,19 +205,6 @@ class FloatingCaptureService : Service() {
         val cropped = Bitmap.createBitmap(padded, 0, 0, image.width, image.height)
         if (cropped !== padded) padded.recycle()
         return cropped
-    }
-
-    private fun compressForUpload(source: Bitmap): ByteArray {
-        val longest = maxOf(source.width, source.height)
-        val scaled = if (longest > 1440) {
-            val scale = 1440.0 / longest
-            Bitmap.createScaledBitmap(source, (source.width * scale).toInt(), (source.height * scale).toInt(), true)
-        } else source
-        return ByteArrayOutputStream().use { output ->
-            scaled.compress(Bitmap.CompressFormat.JPEG, 80, output)
-            if (scaled !== source) scaled.recycle()
-            output.toByteArray()
-        }
     }
 
     private fun isNearlyBlack(bitmap: Bitmap): Boolean {
@@ -246,10 +243,10 @@ class FloatingCaptureService : Service() {
             .onFailure { AnalysisBus.update(AnalysisState.Error("无法显示悬浮球：${it.message}")) }
     }
 
-    private fun showAnalyzingOverlay() {
+    private fun showAnalyzingOverlay(message: String = "理伴正在分析…") {
         removeOverlayViews()
         val text = TextView(this).apply {
-            this.text = "理伴正在分析…"
+            this.text = message
             gravity = Gravity.CENTER
             setTextColor(Color.WHITE)
             textSize = 14f
@@ -260,7 +257,7 @@ class FloatingCaptureService : Service() {
         runCatching { windowManager.addView(text, params); resultView = text }
     }
 
-    private fun showResultOverlay(scene: SceneContext, decision: DecisionResult) {
+    private fun showResultOverlay(scene: SceneContext, decision: DecisionResult, enriching: Boolean) {
         removeOverlayViews()
         val container = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -272,8 +269,20 @@ class FloatingCaptureService : Service() {
         container.addView(label("${scene.product.name} · ${Money(scene.price.currentCents).yuanText()}", 15f, true))
         container.addView(label(decision.display.summary, 14f))
         decision.display.keyPoints.take(4).forEach { container.addView(label("• $it", 13f)) }
-        if (decision.sourceMode != SourceMode.LIVE) {
-            container.addView(label(if (decision.sourceMode == SourceMode.FALLBACK) "演示回退数据" else "部分实时数据", 12f, true, Color.rgb(170, 90, 0)))
+        val price = decision.price
+        if (enriching) {
+            container.addView(label("价格：正在查询…", 12f, true, Color.rgb(70, 90, 160)))
+        } else if (price != null) {
+            val source = when (price.evidenceSource) {
+                PriceEvidenceSource.SEARCH_VERIFIED -> "实时搜索验证"
+                PriceEvidenceSource.SEARCH_ASSISTED_ESTIMATE -> "搜索辅助估价"
+                PriceEvidenceSource.MODEL_ESTIMATE -> "模型知识估价"
+                PriceEvidenceSource.UNAVAILABLE -> "价格不可用"
+            }
+            val range = if (price.referenceLowCents != null && price.referenceHighCents != null) {
+                " · ${Money(price.referenceLowCents).yuanText()}–${Money(price.referenceHighCents).yuanText()}"
+            } else ""
+            container.addView(label("价格：$source$range", 12f, true, Color.rgb(70, 90, 160)))
         }
         container.addView(LinearLayout(this).apply {
             orientation = LinearLayout.HORIZONTAL

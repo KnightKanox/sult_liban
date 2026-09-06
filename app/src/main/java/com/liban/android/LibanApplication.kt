@@ -2,11 +2,10 @@ package com.liban.android
 
 import android.app.Application
 import com.liban.android.agent.AgentOrchestrator
-import com.liban.android.agent.ConfigurablePriceProvider
-import com.liban.android.agent.OpenAiCompatibleLlmProvider
+import com.liban.android.config.ConfigRepository
 import com.liban.android.data.AppDatabase
 import com.liban.android.data.AppRepository
-import com.liban.android.demo.DemoScenarioStore
+import com.liban.android.ocr.MlKitChineseOcrProvider
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
@@ -22,9 +21,7 @@ class LibanApplication : Application() {
     override fun onCreate() {
         super.onCreate()
         graph = AppGraph(this)
-        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch {
-            graph.repository.ensureDefaults()
-        }
+        CoroutineScope(SupervisorJob() + Dispatchers.IO).launch { graph.repository.ensureDefaults() }
     }
 }
 
@@ -36,24 +33,18 @@ class AppGraph(application: Application) {
     }
     private val database = AppDatabase.create(application)
     val repository = AppRepository(database.appDao(), json)
-    val demoStore = DemoScenarioStore(application)
+    val configRepository = ConfigRepository(application)
     private val httpClient = OkHttpClient.Builder()
-        .connectTimeout(6, TimeUnit.SECONDS)
-        .readTimeout(10, TimeUnit.SECONDS)
-        .writeTimeout(10, TimeUnit.SECONDS)
-        .callTimeout(12, TimeUnit.SECONDS)
+        .connectTimeout(2, TimeUnit.SECONDS)
+        .readTimeout(5, TimeUnit.SECONDS)
+        .writeTimeout(3, TimeUnit.SECONDS)
+        .callTimeout(5, TimeUnit.SECONDS)
         .build()
-    private val llmProvider = OpenAiCompatibleLlmProvider(httpClient, json)
-    private val priceProvider = ConfigurablePriceProvider(httpClient, json)
-    val orchestrator = AgentOrchestrator(repository, llmProvider, priceProvider, demoStore)
-    val serviceConfiguration = ServiceConfiguration(
-        llmConfigured = llmProvider.configured,
-        priceConfigured = priceProvider.configured,
+    val orchestrator = AgentOrchestrator(
+        repository = repository,
+        configRepository = configRepository,
+        ocrProvider = MlKitChineseOcrProvider(),
+        httpClient = httpClient,
+        json = json,
     )
 }
-
-data class ServiceConfiguration(
-    val llmConfigured: Boolean,
-    val priceConfigured: Boolean,
-)
-

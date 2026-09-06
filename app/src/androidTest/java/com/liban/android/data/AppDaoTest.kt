@@ -91,4 +91,22 @@ class AppDaoTest {
         assertEquals("PURCHASE", dao.getDecision("persistent")?.userAction)
         assertEquals(1, dao.observeTransactions().first().size)
     }
+
+    @Test
+    fun priceCacheHonorsExpiration() = runBlocking {
+        dao.upsertPriceCache(
+            PriceCacheEntity(
+                cacheKey = "sony:299900",
+                productName = "Sony WH-1000XM6",
+                pagePriceCents = 299_900,
+                comparisonJson = "{}",
+                priceSource = "SEARCH_VERIFIED",
+                createdAt = 100,
+                expiresAt = 200,
+            )
+        )
+        assertNotNull(dao.getValidPriceCache("sony:299900", 199))
+        assertNull(dao.getValidPriceCache("sony:299900", 200))
+        assertEquals(1, dao.deleteExpiredPriceCache(200))
+    }
 }

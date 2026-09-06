@@ -49,7 +49,6 @@ class MainActivity : ComponentActivity() {
         setContent {
             LibanApp(
                 viewModel = viewModel,
-                serviceConfiguration = (application as LibanApplication).graph.serviceConfiguration,
                 onStartScreenMode = ::startScreenMode,
                 onStopScreenMode = {
                     startService(Intent(this, FloatingCaptureService::class.java).apply {

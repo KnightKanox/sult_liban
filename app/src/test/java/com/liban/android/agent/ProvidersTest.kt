@@ -6,7 +6,6 @@ import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
-import okhttp3.mockwebserver.SocketPolicy
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -16,153 +15,94 @@ import java.util.concurrent.TimeUnit
 class ProvidersTest {
     private lateinit var server: MockWebServer
     private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
-    private val client = OkHttpClient.Builder().callTimeout(300, TimeUnit.MILLISECONDS).build()
+    private val client = OkHttpClient.Builder().callTimeout(500, TimeUnit.MILLISECONDS).build()
 
-    @Before
-    fun setUp() {
-        server = MockWebServer()
-        server.start()
-    }
+    @Before fun setUp() { server = MockWebServer(); server.start() }
+    @After fun tearDown() { server.shutdown() }
 
-    @After
-    fun tearDown() {
-        server.shutdown()
+    @Test
+    fun zhipuSearchUsesDocumentedContract() = runTest {
+        server.enqueue(MockResponse().setBody(
+            """{"search_result":[{"title":"Sony WH-1000XM6","content":"售价 ¥2999","link":"https://shop.example/item","media":"测试"}]}"""
+        ))
+        val hits = search().search("Sony WH-1000XM6 售价 价格 购买")
+        val request = server.takeRequest()
+        assertEquals("/paas/v4/web_search", request.path)
+        assertTrue(request.body.readUtf8().contains("search_pro"))
+        assertEquals(1, hits.size)
+        assertEquals("https://shop.example/item", hits.first().url)
     }
 
     @Test
-    fun malformedPerceptionIsRetriedOnce() = runTest {
-        server.enqueue(chatResponse("not json"))
-        server.enqueue(chatResponse(validSceneJson()))
-        val provider = llm()
-
-        val scene = provider.perceive(byteArrayOf(1, 2, 3))
-
-        assertEquals("测试商品", scene.product.name)
-        assertEquals(2, server.requestCount)
+    fun zhipuReaderUsesDocumentedContract() = runTest {
+        server.enqueue(MockResponse().setBody(
+            """{"reader_result":{"title":"详情","content":"售价 ¥2999","url":"https://shop.example/item"}}"""
+        ))
+        val page = search().read("https://shop.example/item")
+        assertEquals("售价 ¥2999", page.content)
+        assertEquals("/paas/v4/reader", server.takeRequest().path)
     }
 
     @Test
-    fun invalidPerceptionSchemaIsRetriedOnce() = runTest {
-        server.enqueue(chatResponse(validSceneJson().replace("19900", "-1")))
-        server.enqueue(chatResponse(validSceneJson()))
-
-        assertEquals(19_900, llm().perceive(byteArrayOf()).price.currentCents)
-        assertEquals(2, server.requestCount)
-    }
-
-    @Test
-    fun httpErrorIsReportedWithoutParsingRetry() = runTest {
-        server.enqueue(MockResponse().setResponseCode(401).setBody("{}"))
-
-        val error = runCatching { llm().perceive(byteArrayOf()) }.exceptionOrNull()
-
-        assertTrue(error is ProviderHttpException)
-        assertEquals(401, (error as ProviderHttpException).status)
-        assertEquals(1, server.requestCount)
-    }
-
-    @Test
-    fun rateLimitStatusIsPreserved() = runTest {
+    fun zhipuHttpStatusIsPreserved() = runTest {
         server.enqueue(MockResponse().setResponseCode(429).setBody("{}"))
-
-        val error = runCatching { llm().perceive(byteArrayOf()) }.exceptionOrNull()
-
+        val error = runCatching { search().search("test") }.exceptionOrNull()
         assertEquals(429, (error as ProviderHttpException).status)
     }
 
     @Test
-    fun blankDecisionIdIsReplacedAndDisplayIsBounded() = runTest {
-        server.enqueue(
-            chatResponse(
-                """{"decision_id":"","risk_score":0.8,"risk_level":"HIGH","recommendation":"DELAY","delay_hours":24,"factors":["a"],"display":{"title":"等等","summary":"有压力","key_points":["1","2","3","4","5"]},"source_mode":"LIVE"}"""
-            )
-        )
-
-        val decision = llm().decide(scene(), SkillResults())
-
-        assertTrue(decision.decisionId.isNotBlank())
-        assertEquals(4, decision.display.keyPoints.size)
-    }
-
-    @Test
-    fun invalidDecisionFailsAfterExactlyOneRetry() = runTest {
-        val invalid = """{"risk_score":2.0,"risk_level":"HIGH","recommendation":"DELAY","factors":[],"display":{"title":"等等","summary":"有压力","key_points":[]}}"""
-        server.enqueue(chatResponse(invalid))
-        server.enqueue(chatResponse(invalid))
-
-        val error = runCatching { llm().decide(scene(), SkillResults()) }.exceptionOrNull()
-
-        assertTrue(error is IllegalStateException)
+    fun malformedEstimateRetriesOnce() = runTest {
+        server.enqueue(chatResponse("not json"))
+        server.enqueue(chatResponse("""{"status":"KNOWN","low_cents":250000,"high_cents":300000,"confidence":0.8,"rationale":"常见价格区间"}"""))
+        val result = estimator().estimate(input())
+        assertEquals(PriceEstimateStatus.KNOWN, result.status)
         assertEquals(2, server.requestCount)
     }
 
     @Test
-    fun pricePremiumIsRecomputedFromTrustedPagePrice() = runTest {
-        server.enqueue(
-            MockResponse().setBody(
-                """{"availability":"AVAILABLE","reference_low_cents":15000,"reference_high_cents":18000,"page_price_cents":1,"premium_ratio":-9.0,"source":"FALLBACK"}"""
-            )
-        )
-
-        val result = price().compare(Product("测试商品", "other"), Money(19_800))
-
-        assertEquals(19_800, result.pagePriceCents)
-        assertEquals(0.1, result.premiumRatio!!, 0.0001)
-        assertEquals(SourceMode.LIVE, result.source)
+    fun unknownEstimateHasNoRange() = runTest {
+        server.enqueue(chatResponse("""{"status":"UNKNOWN","low_cents":1,"high_cents":2,"confidence":0.1,"rationale":"资料不足"}"""))
+        val result = estimator().estimate(input())
+        assertNull(result.lowCents)
+        assertNull(result.highCents)
     }
 
     @Test
-    fun unavailablePriceDoesNotPretendToHaveARange() = runTest {
-        server.enqueue(
-            MockResponse().setBody(
-                """{"availability":"UNAVAILABLE","reference_low_cents":1,"reference_high_cents":2,"page_price_cents":1,"premium_ratio":1.0}"""
-            )
-        )
-
-        val result = price().compare(Product("无结果", "other"), Money(500))
-
-        assertNull(result.referenceLowCents)
-        assertNull(result.referenceHighCents)
-        assertNull(result.premiumRatio)
+    fun llmRequestContainsNoImageOrBase64() = runTest {
+        server.enqueue(chatResponse("""{"status":"UNKNOWN","confidence":0.1,"rationale":"资料不足"}"""))
+        estimator().estimate(input())
+        val body = server.takeRequest().body.readUtf8()
+        assertFalse(body.contains("image_url"))
+        assertFalse(body.contains("base64", ignoreCase = true))
+        assertTrue(body.contains("page_price_cents"))
     }
 
     @Test
-    fun timeoutIsSurfacedToTheOrchestrator() = runTest {
-        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
-
-        val error = runCatching { llm().perceive(byteArrayOf()) }.exceptionOrNull()
-
-        assertNotNull(error)
+    fun forgedLinkFailsAfterOneRetry() = runTest {
+        val response = chatResponse("""{"status":"KNOWN","low_cents":250000,"high_cents":300000,"confidence":0.8,"rationale":"见 https://fake.example"}""")
+        server.enqueue(response)
+        server.enqueue(response.clone())
+        val error = runCatching { estimator().estimate(input()) }.exceptionOrNull()
+        assertTrue(error is IllegalStateException)
+        assertEquals(2, server.requestCount)
     }
 
-    private fun llm() = OpenAiCompatibleLlmProvider(
-        client = client,
-        json = json,
-        endpoint = server.url("/v1/chat/completions").toString(),
-        apiKey = "test-key",
-        model = "test-model",
+    private fun search() = ZhipuSearchProvider(
+        client, json, server.url("/").toString().trimEnd('/'), "test-key", "search_pro"
     )
 
-    private fun price() = ConfigurablePriceProvider(
-        client = client,
-        json = json,
-        endpoint = server.url("/price").toString(),
-        apiKey = "test-key",
+    private fun estimator() = OpenAiCompatiblePriceEstimator(
+        client, json, server.url("/v1/chat/completions").toString(), "test-key", "test-model"
     )
 
-    private fun scene() = SceneContext(
-        product = Product("测试商品", "other"),
-        price = PriceInfo(19_900),
-        confidence = 0.9,
+    private fun input() = PriceEstimateInput(
+        Product("Sony WH-1000XM6", "electronics", model = "WH-1000XM6"),
+        2_999_00,
     )
-
-    private fun validSceneJson() =
-        """{"scene_type":"ecommerce_product","product":{"name":"测试商品","category":"other"},"price":{"current_cents":19900,"currency":"CNY"},"signals":{},"required_skills":["budget_check"],"confidence":0.9}"""
 
     private fun chatResponse(content: String): MockResponse {
         val escaped = content.replace("\\", "\\\\").replace("\"", "\\\"")
-        return MockResponse()
-            .setHeader("Content-Type", "application/json")
+        return MockResponse().setHeader("Content-Type", "application/json")
             .setBody("""{"choices":[{"message":{"content":"$escaped"}}]}""")
     }
 }
