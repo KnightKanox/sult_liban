@@ -2,10 +2,14 @@ package com.liban.android.agent
 
 import com.liban.android.model.*
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.withTimeout
+import kotlinx.coroutines.TimeoutCancellationException
 import kotlinx.serialization.json.Json
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.SocketPolicy
 import org.junit.After
 import org.junit.Assert.*
 import org.junit.Before
@@ -14,7 +18,7 @@ import java.util.concurrent.TimeUnit
 
 class ProvidersTest {
     private lateinit var server: MockWebServer
-    private val json = Json { ignoreUnknownKeys = true; explicitNulls = false }
+    private val json = Json { ignoreUnknownKeys = true; explicitNulls = false; encodeDefaults = true }
     private val client = OkHttpClient.Builder().callTimeout(500, TimeUnit.MILLISECONDS).build()
 
     @Before fun setUp() { server = MockWebServer(); server.start() }
@@ -74,7 +78,8 @@ class ProvidersTest {
         val body = server.takeRequest().body.readUtf8()
         assertFalse(body.contains("image_url"))
         assertFalse(body.contains("base64", ignoreCase = true))
-        assertTrue(body.contains("page_price_cents"))
+        assertFalse(body.contains("page_price_cents"))
+        assertFalse(body.contains("299900"))
     }
 
     @Test
@@ -85,6 +90,57 @@ class ProvidersTest {
         val error = runCatching { estimator().estimate(input()) }.exceptionOrNull()
         assertTrue(error is IllegalStateException)
         assertEquals(2, server.requestCount)
+    }
+
+    @Test fun missingSearchResultsAreNotReportedAsEmptySuccess() = runTest {
+        server.enqueue(MockResponse().setBody("{}"))
+        val error = runCatching { search().search("商品") }.exceptionOrNull()
+        assertTrue(error is ProviderResponseException)
+        assertTrue(error!!.message!!.contains("search_result"))
+    }
+
+    @Test fun businessErrorWithHttp200IsNotSuccessAndDoesNotLeakMessage() = runTest {
+        server.enqueue(MockResponse().setBody("""{"error":{"code":"123","message":"private-request-value"}}"""))
+        val error = runCatching { search().search("商品") }.exceptionOrNull()
+        assertTrue(error is ProviderResponseException)
+        assertFalse(error!!.message!!.contains("private-request-value"))
+    }
+
+    @Test fun explicitEmptySearchArrayRemainsEmpty() = runTest {
+        server.enqueue(MockResponse().setBody("""{"search_result":[]}"""))
+        assertTrue(search().search("商品").isEmpty())
+    }
+
+    @Test fun unlinkedSearchResultsAreKeptForDiagnosticsButNotPriceVerification() = runTest {
+        server.enqueue(MockResponse().setBody("""{"search_result":[{"title":"WH-1000XM6","content":"售价2999元","link":"","publish_date":"2026-09-06"}]}"""))
+        val hits = search().search("WH-1000XM6")
+        assertEquals(1, hits.size)
+        assertEquals("", hits.single().url)
+        assertEquals("2026-09-06", hits.single().publishDate)
+        assertTrue(PriceEvidenceAnalyzer.extract(input().product, hits).isEmpty())
+    }
+
+    @Test fun htmlEndpointResponseIsReportedAsWrongResponseNotEstimateJson() = runTest {
+        server.enqueue(MockResponse().setBody("<html>Gateway home</html>"))
+        val error = runCatching { estimator().estimate(input()) }.exceptionOrNull()
+        assertTrue(error is ProviderResponseException)
+        assertTrue(error!!.message!!.contains("接口完整地址"))
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test fun networkTimeoutIsNotRetriedOrReportedAsJsonFailure() = runBlocking {
+        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
+        val error = runCatching { estimator().estimate(input()) }.exceptionOrNull()
+        assertTrue(error is ProviderTransportException)
+        assertTrue(error!!.message!!.contains("超时"))
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test fun coroutineDeadlineCancelsRequestWithoutJsonRetry() = runBlocking {
+        server.enqueue(chatResponse("""{"status":"UNKNOWN"}""").setBodyDelay(2, TimeUnit.SECONDS))
+        val error = runCatching { withTimeout(200) { estimator().estimate(input()) } }.exceptionOrNull()
+        assertTrue(error is TimeoutCancellationException)
+        assertEquals(1, server.requestCount)
     }
 
     private fun search() = ZhipuSearchProvider(

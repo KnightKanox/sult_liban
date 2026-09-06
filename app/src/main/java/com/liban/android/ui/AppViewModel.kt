@@ -43,6 +43,7 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
             readerEnabled = it.readerEnabled,
             searchApiKey = it.searchApiKey,
             hasSearchKey = it.searchApiKey.isNotBlank(),
+            llmOcrEnabled = it.llmOcrEnabled,
         )
     }
 
@@ -81,12 +82,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
 
     fun saveApiConfiguration(
         llmEndpoint: String, llmKey: String, llmModel: String,
-        searchBaseUrl: String, searchKey: String, searchEngine: String, readerEnabled: Boolean,
+        searchBaseUrl: String, searchKey: String, searchEngine: String, readerEnabled: Boolean, llmOcrEnabled: Boolean = true,
     ) = viewModelScope.launch(Dispatchers.IO) {
         runCatching {
             configRepository.save(
                 llmEndpoint, llmKey.takeIf(String::isNotBlank), llmModel,
-                searchBaseUrl, searchKey.takeIf(String::isNotBlank), searchEngine, readerEnabled,
+                searchBaseUrl, searchKey.takeIf(String::isNotBlank), searchEngine, readerEnabled, llmOcrEnabled,
             )
         }.onSuccess {
             connectionMessages.value = connectionMessages.value + ("SAVE" to "配置已加密保存并立即生效")
@@ -98,6 +99,12 @@ class AppViewModel(application: Application) : AndroidViewModel(application) {
     fun clearLlmConfiguration() = viewModelScope.launch(Dispatchers.IO) {
         configRepository.clearLlm()
         connectionMessages.value = connectionMessages.value - "LLM"
+    }
+
+    fun restorePresetConfiguration() = viewModelScope.launch(Dispatchers.IO) {
+        runCatching { configRepository.restorePresets() }
+            .onSuccess { connectionMessages.value = mapOf("SAVE" to "已恢复预置 DeepSeek 和智谱配置") }
+            .onFailure { connectionMessages.value = connectionMessages.value + ("SAVE" to "恢复预置配置失败") }
     }
 
     fun clearSearchConfiguration() = viewModelScope.launch(Dispatchers.IO) {

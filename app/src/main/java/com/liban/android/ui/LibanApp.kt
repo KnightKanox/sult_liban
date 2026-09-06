@@ -75,7 +75,7 @@ private fun OnboardingScreen(onComplete: (String, String) -> Unit) {
         MoneyField("储蓄目标", goal) { goal = it }
         Spacer(Modifier.height(24.dp))
         Button(onClick = { onComplete(budget, goal) }, modifier = Modifier.fillMaxWidth()) { Text("保存并进入") }
-        Text("截图仅在设备内由 ML Kit OCR 处理，不上传、不保存。", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 12.dp))
+        Text("截图在设备内识别，不上传、不保存。默认将全屏 OCR 文字发送到已配置的 LLM 提取商品名和价格；可在设置中关闭。请避开含聊天、地址或账户信息的页面。", style = MaterialTheme.typography.bodySmall, modifier = Modifier.padding(top = 12.dp))
     }
 }
 
@@ -93,6 +93,7 @@ private fun HomeScreen(state: AppUiState, viewModel: AppViewModel, onStart: () -
             }
         }
         item {
+            Text(if (state.apiConfig.llmOcrEnabled) "智能提取已开启：OCR 文字将发送给 LLM，截图不上传。" else "仅使用设备内文字解析。", style = MaterialTheme.typography.bodySmall)
             Button(onClick = onStart, modifier = Modifier.fillMaxWidth()) { Text("开启识屏模式") }
             TextButton(onClick = onStop, modifier = Modifier.fillMaxWidth()) { Text("停止识屏服务") }
         }
@@ -118,6 +119,7 @@ private fun AnalysisPanel(state: AnalysisState, viewModel: AppViewModel) {
         AnalysisState.Idle -> Text("开启后点击悬浮球“理伴一下”")
         AnalysisState.Capturing -> ProgressText("正在取得当前画面…")
         AnalysisState.Recognizing -> ProgressText("正在设备内识别文字…")
+        AnalysisState.ExtractingProduct -> ProgressText("正在根据页面文字智能提取商品名、型号和价格…")
         is AnalysisState.PreliminaryResult -> DecisionResultCard(state.scene, state.decision, true) { action ->
             viewModel.recordFeedback(state.decision.decisionId, action, state.decision.delayHours)
         }
@@ -154,6 +156,10 @@ private fun DecisionResultCard(scene: SceneContext, decision: DecisionResult, en
     ElevatedCard(Modifier.fillMaxWidth()) { Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
         Text(decision.display.title, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
         Text("${scene.product.name} · ${Money(scene.price.currentCents).yuanText()}")
+        ProductText.summary(scene.product).takeIf(String::isNotBlank)?.let { Text(it, style = MaterialTheme.typography.bodySmall) }
+        Text(scene.price.contextText(), style = MaterialTheme.typography.bodySmall)
+        Text(if (scene.sceneType == "ocr_llm") "识别来源：LLM 结构化提取" else "识别来源：本地自动提取",
+            style = MaterialTheme.typography.bodySmall)
         Text("风险 ${decision.riskLevel.name} · ${decision.display.summary}")
         decision.display.keyPoints.forEach { Text("• $it") }
         if (enriching) {
@@ -246,7 +252,7 @@ private fun DecisionHistoryCard(item: DecisionHistoryEntity) {
     ElevatedCard(Modifier.fillMaxWidth()) { Column(Modifier.padding(14.dp)) {
         Text(item.productName, fontWeight = FontWeight.SemiBold)
         Text("${yuan(item.priceCents)} · ${item.riskLevel} · ${item.recommendation}")
-        val source = if (item.sourceMode == "OCR_LOCAL") item.priceSource else "旧版记录"
+        val source = if (item.sourceMode in setOf("OCR_LOCAL", "OCR_LLM")) item.priceSource else "旧版记录"
         Text("${item.userAction ?: "待反馈"} · $source · ${date(item.createdAt)}", style = MaterialTheme.typography.bodySmall)
     } }
 }
@@ -261,14 +267,24 @@ private fun SettingsScreen(state: AppUiState, viewModel: AppViewModel) {
     var searchEngine by remember(config.searchEngine) { mutableStateOf(config.searchEngine) }
     var searchKey by remember(config.searchApiKey) { mutableStateOf(config.searchApiKey) }
     var readerEnabled by remember(config.readerEnabled) { mutableStateOf(config.readerEnabled) }
+    var llmOcrEnabled by remember(config.llmOcrEnabled) { mutableStateOf(config.llmOcrEnabled) }
     var showLlmKey by remember { mutableStateOf(false) }
     var showSearchKey by remember { mutableStateOf(false) }
     LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        item { Text("接口设置", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold); Text("密钥由 Android Keystore AES-GCM 加密，只保存在本机。") }
+        item {
+            Text("接口设置", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Bold)
+            Text("已提供联调预置配置，保存后在本机加密存储。可自行替换或清除密钥。")
+            TextButton(onClick = viewModel::restorePresetConfiguration) { Text("恢复预置配置") }
+            Text("修改配置后请先保存，再测试连接。", style = MaterialTheme.typography.bodySmall)
+        }
         item { Text("OpenAI-compatible 文本 LLM", style = MaterialTheme.typography.titleMedium) }
         item { OutlinedTextField(llmEndpoint, { llmEndpoint = it }, label = { Text("Chat Completions Endpoint") }, modifier = Modifier.fillMaxWidth()) }
         item { OutlinedTextField(llmModel, { llmModel = it }, label = { Text("模型名") }, modifier = Modifier.fillMaxWidth()) }
         item { SecretField("API Key${if (config.hasLlmKey) "（已加密保存）" else ""}", llmKey, showLlmKey, { llmKey = it }, { showLlmKey = !showLlmKey }) }
+        item {
+            Row { Checkbox(llmOcrEnabled, { llmOcrEnabled = it }); Text("使用 LLM 提取商品信息", modifier = Modifier.padding(top = 12.dp)) }
+            Text("开启后发送全屏 OCR 文字及文字位置，不发送截图；关闭后仅本地解析。", style = MaterialTheme.typography.bodySmall)
+        }
         item {
             Row { Button(onClick = viewModel::testLlm) { Text("测试 LLM") }; TextButton(onClick = viewModel::clearLlmConfiguration) { Text("清除") } }
             state.connectionMessages["LLM"]?.let { Text(it) }
@@ -284,7 +300,7 @@ private fun SettingsScreen(state: AppUiState, viewModel: AppViewModel) {
         }
         item {
             Button(onClick = {
-                viewModel.saveApiConfiguration(llmEndpoint, llmKey, llmModel, searchBase, searchKey, searchEngine, readerEnabled)
+                viewModel.saveApiConfiguration(llmEndpoint, llmKey, llmModel, searchBase, searchKey, searchEngine, readerEnabled, llmOcrEnabled)
             }, modifier = Modifier.fillMaxWidth()) { Text("加密保存全部配置") }
             state.connectionMessages["SAVE"]?.let { Text(it) }
         }
@@ -292,7 +308,7 @@ private fun SettingsScreen(state: AppUiState, viewModel: AppViewModel) {
         items(state.diagnostics, key = { it.provider }) { diagnostic ->
             ElevatedCard(Modifier.fillMaxWidth()) { Column(Modifier.padding(14.dp)) {
                 Text(diagnostic.provider, fontWeight = FontWeight.Bold)
-                Text("最近成功：${diagnostic.lastSuccessAt?.let(::date) ?: "无"}")
+                Text("上次成功（历史）：${diagnostic.lastSuccessAt?.let(::date) ?: "无"}")
                 Text("耗时：${diagnostic.lastLatencyMs?.let { "${it}ms" } ?: "-"} · HTTP ${diagnostic.lastHttpStatus ?: "-"}")
                 diagnostic.lastError?.let { Text(it, color = MaterialTheme.colorScheme.error) }
             } }

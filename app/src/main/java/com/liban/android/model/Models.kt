@@ -42,6 +42,20 @@ data class Product(
     val category: String,
     val brand: String? = null,
     val model: String? = null,
+    @SerialName("raw_title") val rawTitle: String = "",
+    @SerialName("product_type") val productType: String? = null,
+    val attributes: List<ProductAttribute> = emptyList(),
+)
+
+@Serializable enum class AttributeScope { PRODUCT, SELECTED, MENTIONED, UNKNOWN }
+@Serializable enum class PagePriceType { DISPLAYED, GROUP_BUY, COUPON, UNKNOWN }
+
+@Serializable
+data class ProductAttribute(
+    val key: String,
+    val label: String,
+    val value: String,
+    val scope: AttributeScope = AttributeScope.UNKNOWN,
 )
 
 @Serializable
@@ -49,7 +63,21 @@ data class PriceInfo(
     @SerialName("current_cents") val currentCents: Long,
     @SerialName("original_cents") val originalCents: Long? = null,
     val currency: String = "CNY",
+    val type: PagePriceType = PagePriceType.DISPLAYED,
+    val conditions: List<String> = emptyList(),
+    @SerialName("variant_binding") val variantBinding: AttributeScope = AttributeScope.UNKNOWN,
 )
+
+fun PriceInfo.contextText(): String = listOf(
+    when (type) {
+        PagePriceType.GROUP_BUY -> "拼单价"
+        PagePriceType.COUPON -> "券后价"
+        PagePriceType.DISPLAYED -> "页面展示价"
+        PagePriceType.UNKNOWN -> "价格条件不明"
+    },
+    conditions.joinToString("、"),
+    if (variantBinding == AttributeScope.UNKNOWN) "价格对应规格未明确" else "",
+).filter(String::isNotBlank).joinToString(" · ")
 
 @Serializable
 data class SceneSignals(
@@ -92,7 +120,11 @@ data class SearchHit(
     val content: String,
     val url: String,
     val media: String? = null,
+    @SerialName("publish_date") val publishDate: String? = null,
+    @SerialName("match_kind") val matchKind: SearchMatchKind = SearchMatchKind.UNCLASSIFIED,
 )
+
+@Serializable enum class SearchMatchKind { EXACT, SIMILAR, UNCLASSIFIED }
 
 @Serializable
 data class PageDocument(val title: String, val content: String, val url: String)
@@ -178,6 +210,7 @@ sealed interface AnalysisState {
     data object Idle : AnalysisState
     data object Capturing : AnalysisState
     data object Recognizing : AnalysisState
+    data object ExtractingProduct : AnalysisState
     data class PreliminaryResult(val scene: SceneContext, val decision: DecisionResult) : AnalysisState
     data class EnrichingPrice(val scene: SceneContext, val decision: DecisionResult) : AnalysisState
     data class NeedsCorrection(val scene: SceneContext?, val message: String) : AnalysisState

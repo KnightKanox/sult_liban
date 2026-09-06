@@ -1,6 +1,7 @@
 package com.liban.android.config
 
 import android.content.Context
+import com.liban.android.BuildConfig
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
@@ -8,6 +9,7 @@ import androidx.datastore.preferences.core.*
 import androidx.datastore.preferences.preferencesDataStore
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.onStart
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
@@ -24,6 +26,7 @@ data class ApiConfiguration(
     val searchApiKey: String = "",
     val searchEngine: String = "search_pro",
     val readerEnabled: Boolean = true,
+    val llmOcrEnabled: Boolean = true,
 ) {
     val llmConfigured: Boolean
         get() = llmEndpoint.isAllowedEndpoint() && llmApiKey.isNotBlank() && llmModel.isNotBlank()
@@ -41,11 +44,21 @@ data class PublicApiConfiguration(
     val readerEnabled: Boolean = true,
     val searchApiKey: String = "",
     val hasSearchKey: Boolean = false,
+    val llmOcrEnabled: Boolean = true,
 )
 
-class ConfigRepository(private val context: Context) {
+fun bundledApiConfiguration() = ApiConfiguration(
+    llmEndpoint = BuildConfig.PRESET_LLM_ENDPOINT,
+    llmApiKey = BuildConfig.PRESET_LLM_KEY,
+    llmModel = BuildConfig.PRESET_LLM_MODEL,
+    searchBaseUrl = BuildConfig.PRESET_SEARCH_BASE_URL,
+    searchApiKey = BuildConfig.PRESET_SEARCH_KEY,
+    searchEngine = BuildConfig.PRESET_SEARCH_ENGINE,
+)
+
+class ConfigRepository(private val context: Context, private val preset: ApiConfiguration = bundledApiConfiguration()) {
     private val crypto = KeystoreCrypto()
-    val configuration: Flow<ApiConfiguration> = context.configDataStore.data.map { values ->
+    val configuration: Flow<ApiConfiguration> = context.configDataStore.data.onStart { initializePresets() }.map { values ->
         ApiConfiguration(
             llmEndpoint = values[LLM_ENDPOINT].orEmpty(),
             llmApiKey = decryptOrEmpty(values[LLM_KEY]),
@@ -54,8 +67,31 @@ class ConfigRepository(private val context: Context) {
             searchApiKey = decryptOrEmpty(values[SEARCH_KEY]),
             searchEngine = values[SEARCH_ENGINE] ?: "search_pro",
             readerEnabled = values[READER_ENABLED] ?: true,
+            llmOcrEnabled = values[LLM_OCR_ENABLED] ?: true,
         )
     }
+
+    private suspend fun initializePresets() {
+        context.configDataStore.edit { values ->
+            if (values[PRESETS_INITIALIZED] == true) return@edit
+            if (values[LLM_KEY] == null && values[LLM_ENDPOINT].isNullOrBlank()) {
+                values[LLM_ENDPOINT] = preset.llmEndpoint
+                values[LLM_MODEL] = preset.llmModel
+                if (preset.llmApiKey.isNotBlank()) values[LLM_KEY] = crypto.encrypt(preset.llmApiKey)
+            }
+            if (values[SEARCH_KEY] == null) {
+                values[SEARCH_BASE_URL] = preset.searchBaseUrl
+                values[SEARCH_ENGINE] = preset.searchEngine
+                if (preset.searchApiKey.isNotBlank()) values[SEARCH_KEY] = crypto.encrypt(preset.searchApiKey)
+            }
+            values[PRESETS_INITIALIZED] = true
+        }
+    }
+
+    suspend fun restorePresets() = save(
+        preset.llmEndpoint, preset.llmApiKey, preset.llmModel,
+        preset.searchBaseUrl, preset.searchApiKey, preset.searchEngine, preset.readerEnabled, preset.llmOcrEnabled,
+    )
 
     suspend fun save(
         llmEndpoint: String,
@@ -65,13 +101,16 @@ class ConfigRepository(private val context: Context) {
         searchApiKey: String?,
         searchEngine: String,
         readerEnabled: Boolean,
+        llmOcrEnabled: Boolean = true,
     ) {
+        initializePresets()
         context.configDataStore.edit { values ->
             values[LLM_ENDPOINT] = llmEndpoint.trim().trimEnd('/')
             values[LLM_MODEL] = llmModel.trim()
             values[SEARCH_BASE_URL] = searchBaseUrl.trim().trimEnd('/')
             values[SEARCH_ENGINE] = searchEngine.trim().ifBlank { "search_pro" }
             values[READER_ENABLED] = readerEnabled
+            values[LLM_OCR_ENABLED] = llmOcrEnabled
             llmApiKey?.takeIf { it.isNotBlank() }?.let { values[LLM_KEY] = crypto.encrypt(it.trim()) }
             searchApiKey?.takeIf { it.isNotBlank() }?.let { values[SEARCH_KEY] = crypto.encrypt(it.trim()) }
         }
@@ -79,10 +118,12 @@ class ConfigRepository(private val context: Context) {
 
     suspend fun clearLlm() = context.configDataStore.edit {
         it.remove(LLM_ENDPOINT); it.remove(LLM_MODEL); it.remove(LLM_KEY)
+        it[PRESETS_INITIALIZED] = true
     }
 
     suspend fun clearSearch() = context.configDataStore.edit {
         it.remove(SEARCH_KEY)
+        it[PRESETS_INITIALIZED] = true
     }
 
     private fun decryptOrEmpty(value: String?): String =
@@ -96,6 +137,8 @@ class ConfigRepository(private val context: Context) {
         val SEARCH_KEY = stringPreferencesKey("search_api_key_encrypted")
         val SEARCH_ENGINE = stringPreferencesKey("search_engine")
         val READER_ENABLED = booleanPreferencesKey("reader_enabled")
+        val LLM_OCR_ENABLED = booleanPreferencesKey("llm_ocr_enabled")
+        val PRESETS_INITIALIZED = booleanPreferencesKey("presets_initialized_v1")
     }
 }
 

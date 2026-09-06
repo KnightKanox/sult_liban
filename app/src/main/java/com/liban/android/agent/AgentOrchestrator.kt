@@ -7,6 +7,8 @@ import com.liban.android.data.AppRepository
 import com.liban.android.model.*
 import com.liban.android.ocr.OcrProvider
 import com.liban.android.ocr.SceneParser
+import com.liban.android.ocr.LlmSceneExtractor
+import com.liban.android.ocr.refineScene
 import com.liban.android.skill.*
 import kotlinx.coroutines.*
 import kotlinx.coroutines.flow.first
@@ -30,11 +32,22 @@ class AgentOrchestrator(
         onUpdate(AnalysisState.Recognizing)
         val document = ocrProvider.recognize(bitmap)
         onOcrFinished()
-        val scene = SceneParser.parse(document)
-            ?: throw LowConfidenceException(null, "没有识别到商品名称和人民币价格，请手动修正")
-        if (scene.productConfidence < 0.65 || scene.priceConfidence < 0.80) {
-            throw LowConfidenceException(scene, "商品名或价格识别置信度不足，请确认后继续")
+        val localScene = SceneParser.parse(document)
+        val config = configRepository.configuration.first()
+        var scene = localScene
+        if (config.llmOcrEnabled && config.llmConfigured && document.lines.isNotEmpty()) {
+            onUpdate(AnalysisState.ExtractingProduct)
+            val start = System.currentTimeMillis()
+            scene = refineScene(localScene, extract = {
+                    LlmSceneExtractor(httpClient, json, config.llmEndpoint, config.llmApiKey, config.llmModel).extract(document, localScene)
+            }) { success, error ->
+                if (error != null) recordFailure("LLM_OCR", true, start, error)
+                else repository.recordDiagnostic("LLM_OCR", true, success, System.currentTimeMillis() - start, 200,
+                    if (!success) "模型未提取到明确商品，已尝试本地识别结果" else null)
+            }
         }
+        scene ?: throw LowConfidenceException(null, "没有识别到商品名称和人民币价格，请手动修正")
+        // Confidence is metadata, not a confirmation gate for a complete scene.
         return analyzeScene(scene, onUpdate)
     }
 
@@ -67,11 +80,11 @@ class AgentOrchestrator(
         onUpdate(AnalysisState.PreliminaryResult(scene, preliminary))
         onUpdate(AnalysisState.EnrichingPrice(scene, preliminary))
 
-        val comparison = repository.getCachedPrice(scene.product, scene.price.currentCents)
+        val comparison = repository.getCachedPrice(scene.product, scene.price)
             ?: withTimeoutOrNull(5_000) { enrichPrice(scene, configRepository.configuration.first()) }
             ?: unavailable(scene.price.currentCents, "外部查询超时")
         if (comparison.evidenceSource != PriceEvidenceSource.UNAVAILABLE && !comparison.cached) {
-            repository.cachePrice(scene.product, comparison)
+            repository.cachePrice(scene.product, scene.price, comparison)
         }
         val finalDecision = DecisionEngine.decide(
             scene,
@@ -88,13 +101,18 @@ class AgentOrchestrator(
         if (!config.searchConfigured) return "智谱搜索配置不完整"
         val start = System.currentTimeMillis()
         return try {
-            val count = withTimeout(3_000) { searchProvider(config).search("Sony WH-1000XM6 售价 价格 购买").size }
+            val product = Product("索尼 WH-1000XM6 耳机", "electronics", model = "WH-1000XM6")
+            val result = withTimeout(3_000) { priceSearch(config).search(product, config.searchEngine) }
+            val relevant = PriceEvidenceAnalyzer.relevantHits(product, result.hits)
+            val samples = PriceEvidenceAnalyzer.extract(product, relevant)
             val elapsed = System.currentTimeMillis() - start
-            repository.recordDiagnostic("ZHIPU_SEARCH", true, true, elapsed, 200, null)
-            "连接成功，返回 $count 条结果（${elapsed}ms）"
-        } catch (error: Throwable) {
+            val warning = if (result.linkedCount == 0) "搜索返回内容但缺少来源链接，不能验证价格" else null
+            repository.recordDiagnostic("ZHIPU_SEARCH", true, result.linkedCount > 0, elapsed, 200, warning)
+            "返回 ${result.hits.size} 条 · 带链接 ${result.linkedCount} 条 · 型号匹配 ${relevant.size} 条 · 价格来源 ${samples.map { it.domain }.distinct().size} 个（${elapsed}ms；${result.engines.joinToString(" → ")}）${warning?.let { "；$it" }.orEmpty()}"
+        } catch (error: Exception) {
+            currentCoroutineContext().ensureActive()
             recordFailure("ZHIPU_SEARCH", true, start, error)
-            "连接失败：${error.message ?: "未知错误"}"
+            "连接失败：${failureMessage(error)}"
         }
     }
 
@@ -111,9 +129,10 @@ class AgentOrchestrator(
             val elapsed = System.currentTimeMillis() - start
             repository.recordDiagnostic("LLM_ESTIMATE", true, true, elapsed, 200, null)
             "连接成功，响应 ${value.status}（${elapsed}ms）"
-        } catch (error: Throwable) {
+        } catch (error: Exception) {
+            currentCoroutineContext().ensureActive()
             recordFailure("LLM_ESTIMATE", true, start, error)
-            "连接失败：${error.message ?: "未知错误"}"
+            "连接失败：${failureMessage(error)}"
         }
     }
 
@@ -125,23 +144,29 @@ class AgentOrchestrator(
             try {
                 val provider = searchProvider(config)
                 withTimeout(3_000) {
-                    hits = provider.search(PriceEvidenceAnalyzer.buildQuery(scene.product))
-                    samples = PriceEvidenceAnalyzer.extract(scene.product, hits)
+                    val result = priceSearch(config).search(scene.product, config.searchEngine)
+                    hits = PriceEvidenceAnalyzer.classifyHits(scene.product, result.hits)
+                    samples = PriceEvidenceAnalyzer.extract(scene.product, hits, pagePrice = scene.price)
                     if (samples.map { it.domain }.distinct().size < 3 && config.readerEnabled) {
                         val pages = withTimeoutOrNull(1_200) {
-                            hits.take(2).map { hit ->
-                                async { runCatching { provider.read(hit.url) }.getOrNull() }
+                            hits.filter { it.url.isNotBlank() }.take(2).map { hit ->
+                                async {
+                                    try { provider.read(hit.url).let { SearchHit(it.title, it.content, hit.url, hit.media, hit.publishDate) } }
+                                    catch (cancelled: CancellationException) { throw cancelled }
+                                    catch (_: Exception) { null }
+                                }
                             }.awaitAll().filterNotNull()
                         }.orEmpty()
-                        val pageHits = pages.map { SearchHit(it.title, it.content, it.url) }
-                        samples = (samples + PriceEvidenceAnalyzer.extract(scene.product, pageHits))
+                        samples = (samples + PriceEvidenceAnalyzer.extract(scene.product, pages, pagePrice = scene.price))
                             .distinctBy { it.domain to it.cents }
                     }
                 }
-                repository.recordDiagnostic("ZHIPU_SEARCH", true, true, System.currentTimeMillis() - start, 200, null)
+                repository.recordDiagnostic("ZHIPU_SEARCH", true, hits.isNotEmpty(), System.currentTimeMillis() - start, 200,
+                    if (hits.isEmpty()) "没有商品相关结果" else if (hits.none { it.url.isNotBlank() }) "摘要缺少来源链接，不能验证价格" else null)
                 PriceEvidenceAnalyzer.verifiedComparison(scene.price.currentCents, samples, System.currentTimeMillis())
                     ?.let { return it }
-            } catch (error: Throwable) {
+            } catch (error: Exception) {
+                currentCoroutineContext().ensureActive()
                 recordFailure("ZHIPU_SEARCH", true, start, error)
             }
         } else {
@@ -159,7 +184,7 @@ class AgentOrchestrator(
                     PriceEstimateInput(
                         product = scene.product,
                         pagePriceCents = scene.price.currentCents,
-                        evidence = if (samples.isEmpty()) emptyList() else hits.take(3),
+                        evidence = hits.sortedByDescending { it.url.isNotBlank() }.take(3),
                     )
                 )
             }
@@ -175,22 +200,27 @@ class AgentOrchestrator(
                     referenceHighCents = high,
                     pagePriceCents = scene.price.currentCents,
                     premiumRatio = (scene.price.currentCents - high).toDouble() / high.coerceAtLeast(1),
-                    evidenceSource = if (samples.isEmpty()) PriceEvidenceSource.MODEL_ESTIMATE else PriceEvidenceSource.SEARCH_ASSISTED_ESTIMATE,
+                    evidenceSource = if (hits.isEmpty()) PriceEvidenceSource.MODEL_ESTIMATE else PriceEvidenceSource.SEARCH_ASSISTED_ESTIMATE,
                     confidence = estimate.confidence,
                     sampleCount = samples.size,
                     references = samples.distinctBy { it.domain }.take(3).map { it.reference },
                     queriedAt = System.currentTimeMillis(),
-                    rationale = estimate.rationale,
+                    rationale = "${estimate.rationale}（${if (scene.product.model == null || hits.any { it.matchKind == SearchMatchKind.SIMILAR }) "同类商品参考，非同款验证；" else ""}模型估算，未经实时成交价验证）",
                 )
             }
-        } catch (error: Throwable) {
+        } catch (error: Exception) {
+            currentCoroutineContext().ensureActive()
             recordFailure("LLM_ESTIMATE", true, start, error)
-            unavailable(scene.price.currentCents, error.message ?: "模型估价失败")
+            unavailable(scene.price.currentCents, failureMessage(error))
         }
     }
 
     private fun searchProvider(config: ApiConfiguration) =
         ZhipuSearchProvider(httpClient, json, config.searchBaseUrl, config.searchApiKey, config.searchEngine)
+
+    private fun priceSearch(config: ApiConfiguration) = PriceSearch { engine ->
+        ZhipuSearchProvider(httpClient, json, config.searchBaseUrl, config.searchApiKey, engine)
+    }
 
     private fun estimator(config: ApiConfiguration) =
         OpenAiCompatiblePriceEstimator(httpClient, json, config.llmEndpoint, config.llmApiKey, config.llmModel)
@@ -201,9 +231,19 @@ class AgentOrchestrator(
             configured,
             false,
             System.currentTimeMillis() - start,
-            (error as? ProviderHttpException)?.status,
-            error.message,
+            when (error) {
+                is ProviderHttpException -> error.status
+                is ProviderResponseException -> 200
+                else -> null
+            },
+            failureMessage(error),
         )
+    }
+
+    private fun failureMessage(error: Throwable): String = when (error) {
+        is TimeoutCancellationException -> "接口请求超时，未在限定时间内完成"
+        is ProviderHttpException, is ProviderResponseException, is ProviderTransportException -> error.message ?: "接口失败"
+        else -> "接口处理失败，请检查配置后重试"
     }
 
     private fun unavailable(pagePriceCents: Long, reason: String) = PriceComparison(

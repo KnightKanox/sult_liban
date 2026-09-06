@@ -165,6 +165,7 @@ class FloatingCaptureService : Service() {
                             is AnalysisState.Result ->
                                 showResultOverlay(state.scene, state.decision, enriching = false)
                             AnalysisState.Recognizing -> showAnalyzingOverlay("正在本地识别商品…")
+                            AnalysisState.ExtractingProduct -> showAnalyzingOverlay("正在智能提取商品和价格…")
                             else -> Unit
                         }
                     },
@@ -173,7 +174,7 @@ class FloatingCaptureService : Service() {
                 throw cancelled
             } catch (error: Throwable) {
                 if (error is LowConfidenceException) {
-                    AnalysisBus.update(AnalysisState.NeedsCorrection(error.scene, error.message ?: "识别置信度低"))
+                    AnalysisBus.update(AnalysisState.NeedsCorrection(error.scene, error.message ?: "缺少有效商品信息"))
                     showOpenAppOverlay("请确认商品信息", "点击打开理伴进行修正")
                 } else {
                     AnalysisBus.update(AnalysisState.Error(error.message ?: "分析失败"))
@@ -267,6 +268,7 @@ class FloatingCaptureService : Service() {
         }
         container.addView(label(decision.display.title, 20f, true, riskColor(decision.riskLevel)))
         container.addView(label("${scene.product.name} · ${Money(scene.price.currentCents).yuanText()}", 15f, true))
+        container.addView(label(scene.price.contextText(), 12f))
         container.addView(label(decision.display.summary, 14f))
         decision.display.keyPoints.take(4).forEach { container.addView(label("• $it", 13f)) }
         val price = decision.price

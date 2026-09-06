@@ -1,9 +1,19 @@
+import java.util.Properties
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.plugin.compose")
     id("org.jetbrains.kotlin.plugin.serialization")
     id("com.google.devtools.ksp")
 }
+
+// Only the ignored local file contains credentials; never commit its contents.
+val apiPresets = Properties().apply {
+    val presetFile = rootProject.file("api-presets.local.properties")
+    if (presetFile.exists()) presetFile.inputStream().use { load(it) }
+}
+fun presetLiteral(key: String, fallback: String = ""): String =
+    "\"" + apiPresets.getProperty(key, fallback).replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "\\n").replace("\r", "\\r") + "\""
 
 android {
     namespace = "com.liban.android"
@@ -23,6 +33,13 @@ android {
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
         vectorDrawables.useSupportLibrary = true
 
+        buildConfigField("String", "PRESET_LLM_ENDPOINT", presetLiteral("llm.endpoint", "https://api.deepseek.com/v1/chat/completions"))
+        buildConfigField("String", "PRESET_LLM_MODEL", presetLiteral("llm.model", "deepseek-v4-flash"))
+        buildConfigField("String", "PRESET_LLM_KEY", presetLiteral("llm.key"))
+        buildConfigField("String", "PRESET_SEARCH_BASE_URL", presetLiteral("search.baseUrl", "https://open.bigmodel.cn/api"))
+        buildConfigField("String", "PRESET_SEARCH_ENGINE", presetLiteral("search.engine", "search_pro_quark"))
+        buildConfigField("String", "PRESET_SEARCH_KEY", presetLiteral("search.key"))
+
     }
 
     buildTypes {
@@ -39,6 +56,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 
     packaging.resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"

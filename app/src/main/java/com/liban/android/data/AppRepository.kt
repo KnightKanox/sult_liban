@@ -62,7 +62,7 @@ class AppRepository(private val dao: AppDao, private val json: Json) {
                 resultJson = json.encodeToString(DecisionResult.serializer(), decision),
                 riskLevel = decision.riskLevel.name,
                 recommendation = decision.recommendation.name,
-                sourceMode = "OCR_LOCAL",
+                sourceMode = if (scene.sceneType == "ocr_llm") "OCR_LLM" else "OCR_LOCAL",
                 priceSource = decision.price?.evidenceSource?.name ?: PriceEvidenceSource.UNAVAILABLE.name,
                 createdAt = System.currentTimeMillis(),
             )
@@ -79,14 +79,14 @@ class AppRepository(private val dao: AppDao, private val json: Json) {
         )
     }
 
-    suspend fun getCachedPrice(product: Product, pagePriceCents: Long): PriceComparison? {
-        val entity = dao.getValidPriceCache(cacheKey(product, pagePriceCents), System.currentTimeMillis()) ?: return null
+    suspend fun getCachedPrice(product: Product, price: PriceInfo): PriceComparison? {
+        val entity = dao.getValidPriceCache(cacheKey(product, price), System.currentTimeMillis()) ?: return null
         return runCatching {
             json.decodeFromString(PriceComparison.serializer(), entity.comparisonJson).copy(cached = true)
         }.getOrNull()
     }
 
-    suspend fun cachePrice(product: Product, comparison: PriceComparison) {
+    suspend fun cachePrice(product: Product, price: PriceInfo, comparison: PriceComparison) {
         val ttl = when (comparison.evidenceSource) {
             PriceEvidenceSource.SEARCH_VERIFIED -> TimeUnit.HOURS.toMillis(2)
             PriceEvidenceSource.SEARCH_ASSISTED_ESTIMATE,
@@ -97,7 +97,7 @@ class AppRepository(private val dao: AppDao, private val json: Json) {
         dao.deleteExpiredPriceCache(now)
         dao.upsertPriceCache(
             PriceCacheEntity(
-                cacheKey = cacheKey(product, comparison.pagePriceCents),
+                cacheKey = cacheKey(product, price),
                 productName = product.name,
                 pagePriceCents = comparison.pagePriceCents,
                 comparisonJson = json.encodeToString(PriceComparison.serializer(), comparison.copy(cached = false)),
@@ -108,8 +108,8 @@ class AppRepository(private val dao: AppDao, private val json: Json) {
         )
     }
 
-    private fun cacheKey(product: Product, pagePriceCents: Long): String =
-        product.name.lowercase().filter { it.isLetterOrDigit() }.take(80) + ":" + pagePriceCents
+    private fun cacheKey(product: Product, price: PriceInfo): String =
+        json.encodeToString(Product.serializer(), product) + ":" + json.encodeToString(PriceInfo.serializer(), price)
 
     suspend fun recordFeedback(decisionId: String, action: UserAction, delayHours: Int?): Boolean {
         val now = System.currentTimeMillis()
