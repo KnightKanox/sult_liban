@@ -1,0 +1,6 @@
+<resources>
+    <string name="app_name">理伴</string>
+    <string name="capture_channel">理伴识屏服务</string>
+    <string name="capture_notification">识屏模式已开启，点击悬浮球开始分析</string>
+</resources>
+

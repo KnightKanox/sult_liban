@@ -1,0 +1,8 @@
+# Copy to local.properties. Never commit real competition keys.
+sdk.dir=C\:\\Users\\YOUR_NAME\\AppData\\Local\\Android\\Sdk
+LIBAN_LLM_BASE_URL=
+LIBAN_LLM_API_KEY=
+LIBAN_LLM_MODEL=
+LIBAN_PRICE_BASE_URL=
+LIBAN_PRICE_API_KEY=
+
